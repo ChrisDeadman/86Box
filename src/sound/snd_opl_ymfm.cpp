@@ -87,13 +87,13 @@ public:
     virtual void     set_clock(uint32_t clock)                               = 0;
 
 protected:
-    int32_t  m_buffer[MUSICBUFLEN * 2];
-    int      m_buf_pos;
-    int      *m_buf_pos_global;
-    int8_t   m_flags;
-    fm_type  m_type;
-    uint32_t m_samplerate;
-    int      m_48k;
+    int32_t       m_buffer[MUSICBUFLEN * 2];
+    int           m_buf_pos;
+    volatile int *m_buf_pos_global;
+    int8_t        m_flags;
+    fm_type       m_type;
+    uint32_t      m_samplerate;
+    int           m_48k;
 };
 
 template <typename ChipType>
