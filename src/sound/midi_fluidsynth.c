@@ -276,7 +276,7 @@ fluidsynth_init(UNUSED(const device_t *info))
         data->buffer_int16 = calloc(1, data->buf_size);
     }
 
-    al_set_midi(data->samplerate, data->buf_size);
+    al_set_midi(data->samplerate, data->buf_size / (sound_is_float ? (int) sizeof(float) : (int) sizeof(int16_t)));
 
     dev = calloc(1, sizeof(midi_device_t));
 
