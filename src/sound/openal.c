@@ -103,7 +103,8 @@ void
 al_set_midi(const int freq, const int buf_size)
 {
     midi_freq     = freq;
-    midi_buf_size = buf_size;
+    if (buf_size > 0)
+        midi_buf_size = (buf_size <= AL_STAGE_SAMPLES) ? buf_size : AL_STAGE_SAMPLES;
 }
 
 const char *

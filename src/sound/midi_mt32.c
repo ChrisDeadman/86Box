@@ -296,7 +296,7 @@ mt32emu_init(char *control_rom, char *pcm_rom)
     mt32emu_set_reversed_stereo_enabled(context, device_get_config_int("reversed_stereo"));
     mt32emu_set_nice_amp_ramp_enabled(context, device_get_config_int("nice_ramp"));
 
-    al_set_midi(samplerate, buf_size);
+    al_set_midi(samplerate, buf_size / (sound_is_float ? (int) sizeof(float) : (int) sizeof(int16_t)));
 
     dev = calloc(1, sizeof(midi_device_t));
 
