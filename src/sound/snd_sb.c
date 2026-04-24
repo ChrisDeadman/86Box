@@ -531,7 +531,7 @@ sb_get_wavetable_buffer_goldfinch(int32_t *buffer, const int len, void *priv)
         buffer[c + 1] += (int32_t) out_r;
     }
 
-    goldfinch->emu8k.pos = 0;
+    emu8k_reset_buffer(&goldfinch->emu8k);
 }
 
 static void
@@ -595,7 +595,7 @@ sb_get_wavetable_buffer_sb16_awe32(int32_t *buffer, const int len, void *priv)
         buffer[c + 1] += (int32_t) (out_r * mixer->output_gain_R);
     }
 
-    sb->emu8k.pos = 0;
+    emu8k_reset_buffer(&sb->emu8k);
 }
 
 void
