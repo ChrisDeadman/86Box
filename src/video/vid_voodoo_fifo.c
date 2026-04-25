@@ -296,6 +296,9 @@ cmdfifo_get(voodoo_t *voodoo)
 {
     uint32_t val;
 
+    if (!voodoo->fifo_thread_run)
+        return 0;
+
     if (!voodoo->cmdfifo_in_sub) {
         while (voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd == voodoo->cmdfifo_depth_wr)) {
             thread_wait_event(voodoo->wake_fifo_thread, -1);
@@ -336,6 +339,9 @@ static uint32_t
 cmdfifo_get_2(voodoo_t *voodoo)
 {
     uint32_t val;
+
+    if (!voodoo->fifo_thread_run)
+        return 0;
 
     if (!voodoo->cmdfifo_in_sub_2) {
         while (voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd_2 == voodoo->cmdfifo_depth_wr_2)) {
@@ -488,7 +494,7 @@ voodoo_fifo_thread(void *param)
         thread_set_event(voodoo->fifo_empty_event);
         ATOMIC_STORE(voodoo->fifo_empty_signaled, 1);
 
-        while (voodoo->cmdfifo_enabled && (voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr || voodoo->cmdfifo_in_sub)) {
+        while (voodoo->fifo_thread_run && voodoo->cmdfifo_enabled && (voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr || voodoo->cmdfifo_in_sub)) {
             uint64_t start_time = plat_timer_read();
             uint64_t end_time;
             uint32_t header = cmdfifo_get(voodoo);
@@ -779,7 +785,7 @@ voodoo_fifo_thread(void *param)
             voodoo->time += end_time - start_time;
         }
 
-        while (voodoo->cmdfifo_enabled_2 && (voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2 || voodoo->cmdfifo_in_sub_2)) {
+        while (voodoo->fifo_thread_run && voodoo->cmdfifo_enabled_2 && (voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2 || voodoo->cmdfifo_in_sub_2)) {
             uint64_t start_time = plat_timer_read();
             uint64_t end_time;
             uint32_t header = cmdfifo_get_2(voodoo);

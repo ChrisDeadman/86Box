@@ -475,6 +475,7 @@ typedef struct voodoo_t {
     uint32_t   cmdfifo_amin;
     uint32_t   cmdfifo_amax;
     int        cmdfifo_holecount;
+    uint8_t    cmdfifo_hole_bitmap[0x40000 / 32];
 
     uint32_t   cmdfifo_base_2;
     uint32_t   cmdfifo_end_2;
