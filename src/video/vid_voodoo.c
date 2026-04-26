@@ -107,6 +107,12 @@ voodoo_init_relax_settings(voodoo_t *voodoo)
 }
 
 static void
+voodoo_cmdfifo_set_rp(voodoo_t *voodoo, uint32_t val)
+{
+    voodoo->cmdfifo_rp = val & ~3u;
+}
+
+static void
 voodoo_update_queued_buffers(voodoo_t *voodoo)
 {
     switch (voodoo->queued_lfbMode & LFB_WRITE_MASK) {
@@ -484,6 +490,10 @@ voodoo_readl(uint32_t addr, void *priv)
                 }
                 break;
 
+            case SST_intrCtrl:
+                temp = voodoo->intrCtrl & VOODOO_INTRCTRL_READ_MASK;
+                break;
+
             case SST_fbzColorPath:
                 voodoo_flush(voodoo);
                 temp = voodoo->params.fbzColorPath;
@@ -558,7 +568,7 @@ voodoo_readl(uint32_t addr, void *priv)
                     temp = voodoo->fbiInit2;
                 break;
             case SST_fbiInit3:
-                temp = voodoo->fbiInit3 | (1 << 10) | (2 << 8);
+                temp = voodoo->fbiInit3;
                 break;
 
             case SST_vRetrace:
@@ -692,7 +702,9 @@ voodoo_writel(uint32_t addr, uint32_t val, void *priv)
     } else
         switch (addr & 0x3fc) {
             case SST_intrCtrl:
-                fatal("intrCtrl write %08x\n", val);
+                if (val & VOODOO_INTRCTRL_INTERRUPT_ACTIVE)
+                    voodoo->intrCtrl &= ~VOODOO_INTRCTRL_PENDING_MASK;
+                voodoo->intrCtrl = (voodoo->intrCtrl & ~VOODOO_INTRCTRL_ENABLE_MASK) | (val & VOODOO_INTRCTRL_ENABLE_MASK);
                 break;
             
             case SST_userIntrCMD:
@@ -926,7 +938,7 @@ voodoo_writel(uint32_t addr, uint32_t val, void *priv)
                 break;
 
             case SST_cmdFifoRdPtr:
-                voodoo->cmdfifo_rp = val;
+                voodoo_cmdfifo_set_rp(voodoo, val);
                 break;
             case SST_cmdFifoAMin:
                 voodoo->cmdfifo_amin = val;
@@ -1222,9 +1234,20 @@ voodoo_card_init(void)
             break;
     }
 
-    if (voodoo->type == VOODOO_2) /*generate filter lookup tables*/
+    if (voodoo->type == VOODOO_2) {
+        /*generate filter lookup tables*/
         voodoo_generate_filter_v2(voodoo);
-    else
+        /* Power-on defaults matching Glide/CVG CVG init code (cvg/init/sst1init.c).
+           All fbiInit regs start at zero after calloc; seed hardware-like values so
+           Glide passive reads (especially fbiInit3 memory-type bits) are plausible
+           before the guest writes them.  Derived from Glide 2.x CVG source. */
+        voodoo->fbiInit0 = 0x00001c10;
+        voodoo->fbiInit1 = 0x00201102;
+        voodoo->fbiInit2 = 0x80000040;
+        voodoo->fbiInit3 = 0x00110040;
+        voodoo->fbiInit4 = 0x00000001;
+        voodoo->fbiInit5 = 0x08408000;
+    } else
         voodoo_generate_filter_v1(voodoo);
 
     pci_add_card(PCI_ADD_NORMAL, voodoo_pci_read, voodoo_pci_write, voodoo, &voodoo->pci_slot);
@@ -1522,7 +1545,14 @@ voodoo_init(UNUSED(const device_t *info))
                 tmuConfig = 1 | (3 << 6);
             break;
         case VOODOO_2:
-            tmuConfig = 1 | (3 << 6);
+            /* tmuConfig for dual-TMU Voodoo2.
+             * Derived from MAME voodoo_2_device::device_start():
+             *   bit  0       = TMU0 present
+             *   bit  4       = Voodoo2 base flag (hardware-defined, undocumented)
+             *   bits 7:6 = 3 = TMU1 present (chipmask bit 2 always set on V2)
+             *   bit 11       = Voodoo2-only capability flag
+             * Yields 0x8d1. */
+            tmuConfig = 1 | (1 << 4) | (3 << 6) | (1 << 11);
             break;
 
         default:
