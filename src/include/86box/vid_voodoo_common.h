@@ -303,6 +303,7 @@ typedef struct voodoo_t {
     uint32_t fbiInit5;
     uint32_t fbiInit6;
     uint32_t fbiInit7; /*Voodoo 2*/
+    uint32_t intrCtrl;
 
     uint32_t initEnable;
 
@@ -762,6 +763,13 @@ typedef struct voodoo_t {
     void   *priv;
     uint8_t monitor_index;
 } voodoo_t;
+
+enum {
+    VOODOO_INTRCTRL_ENABLE_MASK            = 0x0030003f,
+    VOODOO_INTRCTRL_PENDING_MASK           = 0x800ff800,
+    VOODOO_INTRCTRL_READ_MASK              = 0x803ff83f,
+    VOODOO_INTRCTRL_INTERRUPT_ACTIVE       = 0x80000000
+};
 
 typedef struct voodoo_set_t {
     voodoo_t *voodoos[2];
