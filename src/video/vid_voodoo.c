@@ -107,6 +107,12 @@ voodoo_init_relax_settings(voodoo_t *voodoo)
 }
 
 static void
+voodoo_cmdfifo_set_rp(voodoo_t *voodoo, uint32_t val)
+{
+    voodoo->cmdfifo_rp = val & ~3u;
+}
+
+static void
 voodoo_update_queued_buffers(voodoo_t *voodoo)
 {
     switch (voodoo->queued_lfbMode & LFB_WRITE_MASK) {
@@ -484,6 +490,10 @@ voodoo_readl(uint32_t addr, void *priv)
                 }
                 break;
 
+            case SST_intrCtrl:
+                temp = voodoo->intrCtrl & VOODOO_INTRCTRL_READ_MASK;
+                break;
+
             case SST_fbzColorPath:
                 voodoo_flush(voodoo);
                 temp = voodoo->params.fbzColorPath;
@@ -558,7 +568,7 @@ voodoo_readl(uint32_t addr, void *priv)
                     temp = voodoo->fbiInit2;
                 break;
             case SST_fbiInit3:
-                temp = voodoo->fbiInit3 | (1 << 10) | (2 << 8);
+                temp = voodoo->fbiInit3;
                 break;
 
             case SST_vRetrace:
@@ -692,7 +702,9 @@ voodoo_writel(uint32_t addr, uint32_t val, void *priv)
     } else
         switch (addr & 0x3fc) {
             case SST_intrCtrl:
-                fatal("intrCtrl write %08x\n", val);
+                if (val & VOODOO_INTRCTRL_INTERRUPT_ACTIVE)
+                    voodoo->intrCtrl &= ~VOODOO_INTRCTRL_PENDING_MASK;
+                voodoo->intrCtrl = (voodoo->intrCtrl & ~VOODOO_INTRCTRL_ENABLE_MASK) | (val & VOODOO_INTRCTRL_ENABLE_MASK);
                 break;
             
             case SST_userIntrCMD:
@@ -926,7 +938,7 @@ voodoo_writel(uint32_t addr, uint32_t val, void *priv)
                 break;
 
             case SST_cmdFifoRdPtr:
-                voodoo->cmdfifo_rp = val;
+                voodoo_cmdfifo_set_rp(voodoo, val);
                 break;
             case SST_cmdFifoAMin:
                 voodoo->cmdfifo_amin = val;
@@ -1522,7 +1534,8 @@ voodoo_init(UNUSED(const device_t *info))
                 tmuConfig = 1 | (3 << 6);
             break;
         case VOODOO_2:
-            tmuConfig = 1 | (3 << 6);
+            /* Match Voodoo2's documented send-TMU-config signature. */
+            tmuConfig = 0x11 | 0xc0 | 0x800;
             break;
 
         default:
