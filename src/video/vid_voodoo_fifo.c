@@ -301,6 +301,10 @@ cmdfifo_get(voodoo_t *voodoo)
             thread_wait_event(voodoo->wake_fifo_thread, -1);
             thread_reset_event(voodoo->wake_fifo_thread);
         }
+
+        /* During card teardown, stop consuming an unpublished CMDFIFO tail. */
+        if (!voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd >= voodoo->cmdfifo_depth_wr))
+            return 0;
     }
 
     if (voodoo->cmdfifo_in_agp)
@@ -338,6 +342,10 @@ cmdfifo_get_2(voodoo_t *voodoo)
             thread_wait_event(voodoo->wake_fifo_thread, -1);
             thread_reset_event(voodoo->wake_fifo_thread);
         }
+
+        /* During card teardown, stop consuming an unpublished CMDFIFO tail. */
+        if (!voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd_2 >= voodoo->cmdfifo_depth_wr_2))
+            return 0;
     }
 
     if (voodoo->cmdfifo_in_agp_2)
