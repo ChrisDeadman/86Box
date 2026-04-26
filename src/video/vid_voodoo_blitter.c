@@ -43,7 +43,7 @@ enum {
     BLIT_COMMAND_SCREEN_TO_SCREEN = 0,
     BLIT_COMMAND_CPU_TO_SCREEN    = 1,
     BLIT_COMMAND_RECT_FILL        = 2,
-    BLIT_COMMAND_SGRAM_FILL       = 3
+    BLIT_COMMAND_FAST_RECT_FILL   = 3
 };
 
 enum {
@@ -63,7 +63,7 @@ enum {
 };
 
 enum {
-    BLIT_COMMAND_MASK     = 7,
+    BLIT_COMMAND_MASK     = 3,
     BLIT_SRC_FORMAT       = (7 << 3),
     BLIT_SRC_RGB_FORMAT   = (3 << 6),
     BLIT_SRC_CHROMA       = (1 << 10),
@@ -149,7 +149,6 @@ voodooblt_log(const char *fmt, ...)
 void
 voodoo_v2_blit_start(voodoo_t *voodoo)
 {
-    uint64_t dat64;
     int      size_x = ABS(voodoo->bltSizeX);
     int      size_y = ABS(voodoo->bltSizeY);
     int      x_dir = (voodoo->bltSizeX > 0) ? 1 : -1;
@@ -222,6 +221,7 @@ skip_pixel_blit:
             break;
 
         case BLIT_COMMAND_RECT_FILL:
+        case BLIT_COMMAND_FAST_RECT_FILL:
             for (int y = 0; y <= size_y; y++) {
                 uint16_t *dst;
                 int       dst_x = voodoo->bltDstX;
@@ -245,38 +245,6 @@ skip_pixel_fill:
                 }
 skip_line_fill:
                 dst_y += y_dir;
-            }
-            break;
-
-        case BLIT_COMMAND_SGRAM_FILL:
-            /*32x32 tiles - 2kb*/
-            dst_y  = voodoo->bltDstY & 0x3ff;
-            size_x = voodoo->bltSizeX & 0x1ff; // 512*8 = 4kb
-            size_y = voodoo->bltSizeY & 0x3ff;
-
-            dat64 = voodoo->bltColorFg | ((uint64_t) voodoo->bltColorFg << 16) | ((uint64_t) voodoo->bltColorFg << 32) | ((uint64_t) voodoo->bltColorFg << 48);
-
-            for (int y = 0; y <= size_y; y++) {
-                uint64_t *dst;
-
-                /*This may be wrong*/
-                if (!y) {
-                    dst_x  = voodoo->bltDstX & 0x1ff;
-                    size_x = 511 - dst_x;
-                } else if (y < size_y) {
-                    dst_x  = 0;
-                    size_x = 511;
-                } else {
-                    dst_x  = 0;
-                    size_x = voodoo->bltSizeX & 0x1ff;
-                }
-
-                dst = (uint64_t *) &voodoo->fb_mem[(dst_y * 512 * 8 + dst_x * 8) & voodoo->fb_mask];
-
-                for (int x = 0; x <= size_x; x++)
-                    dst[x] = dat64;
-
-                dst_y++;
             }
             break;
 
