@@ -202,6 +202,7 @@ voodoo_recalc(voodoo_t *voodoo)
 
         default:
             fatal("voodoo_recalc : unknown draw buffer\n");
+            break;
     }
 
     voodoo->block_width = ((voodoo->fbiInit1 >> 4) & 15) * 2;
@@ -1218,6 +1219,20 @@ voodoo_card_init(void)
 #ifndef NO_CODEGEN
     voodoo->use_recompiler = device_get_config_int("recompiler");
 #endif
+    switch (voodoo->texture_size) {
+        case 4:
+            voodoo->trexInit0[0] = TREXINIT0_TEXTURE_MEMORY_SIZE_4MB;
+            voodoo->trexInit0[1] = TREXINIT0_TEXTURE_MEMORY_SIZE_4MB;
+            break;
+        case 2:
+            voodoo->trexInit0[0] = TREXINIT0_TEXTURE_MEMORY_SIZE_2MB;
+            voodoo->trexInit0[1] = TREXINIT0_TEXTURE_MEMORY_SIZE_2MB;
+            break;
+        default:
+            voodoo->trexInit0[0] = TREXINIT0_TEXTURE_MEMORY_SIZE_1MB;
+            voodoo->trexInit0[1] = TREXINIT0_TEXTURE_MEMORY_SIZE_1MB;
+            break;
+    }
     voodoo->type = device_get_config_int("type");
     switch (voodoo->type) {
         case VOODOO_1:
