@@ -773,6 +773,7 @@ sound_cd_thread_end(void)
 {
     if (cdaudioon) {
         cdaudioon = 0;
+        cd_thread_enable = 0;
 
         sound_log("Waiting for CD Audio thread to terminate...\n");
         thread_set_event(sound_cd_event);
@@ -788,7 +789,7 @@ sound_cd_thread_end(void)
 
         if (sound_cd_start_event) {
             thread_destroy_event(sound_cd_start_event);
-            sound_cd_event = NULL;
+            sound_cd_start_event = NULL;
         }
     }
 }
