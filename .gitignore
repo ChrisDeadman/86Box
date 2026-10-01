@@ -43,6 +43,9 @@ CMakeFiles
 /.vscode
 /out
 
+# Local-only workspace data
+/.scratch/
+
 # Windows resource compiler
 RC*
 

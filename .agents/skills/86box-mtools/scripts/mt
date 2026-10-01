@@ -1,0 +1,114 @@
+#!/bin/bash
+# mt - the only sanctioned way to read/write guest DOS disk images.
+#
+# This is an allow-list wrapper over mtools. It deliberately does NOT expose
+# mformat / dd / mkfs / wipefs or a raw passthrough: an image is not recoverable
+# once formatted, and the wrapper should make that a non-option.
+#
+# Usage:
+#   mt <image> [--offset <bytes>] <command> [args...]
+#
+#   <image>          guest disk image (MBR whole-disk; DOS fs at partition 1)
+#   --offset <bytes> partition start in bytes, default 32256 (sector 63 * 512)
+#
+# Commands:
+#   ls <path>                 list a guest directory
+#   cat <path>                print a guest file to stdout
+#   info <path>               free-space / geometry info
+#   put <hostfile> <path>     copy one host file in (replaces existing)
+#   get <path> <hostfile>     copy one guest file out
+#   dir <hostdir> <path>      copy a host directory tree in (mtools -s)
+#   rm <path>                 delete one guest file
+#   rmtree <path>             delete a guest directory and everything under it
+#   mkdir <path>              create a guest directory
+#
+# Read commands (ls/cat/info/get) are safe while 86Box runs. Write commands
+# (put/dir/rm/rmtree/mkdir) require 86Box to be stopped - 86Box syncs ramdisks
+# to the image only at clean power-off. The wrapper enforces that and refuses
+# to write otherwise.
+
+set -euo pipefail
+
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+[ $# -ge 2 ] || usage 1
+IMG=$(readlink -f "${1:?no image}")
+shift
+
+OFFSET=32256
+if [ "${1:-}" = "--offset" ]; then
+    OFFSET="${2:?--offset needs a value}"
+    shift 2
+fi
+
+[ -f "$IMG" ] || { echo "mt: no such image: $IMG" >&2; exit 1; }
+
+CMD="${1:?no command (see usage)}"; shift
+I="-i $IMG@@$OFFSET"   # mtools -i with the partition offset
+
+# A write command needs 86Box dead. Reads do not.
+require_stopped() {
+    if pgrep -f "build/src/86B[o]x" >/dev/null; then
+        echo "mt: 86Box is running; stop it first (quit-soft, see 86box-automation)" >&2
+        echo "mt: refused $CMD - the image would be written while 86Box owns it" >&2
+        exit 1
+    fi
+}
+
+# Normalize a guest path to the drive-less ::/ form mtools wants with -i.
+norm() {
+    local p="$1"
+    p="${p#\/*}"          # strip a leading slash
+    case "$p" in
+        ::*) printf '%s' "$p" ;;
+        *)   printf '::/%s' "$p" ;;
+    esac
+}
+
+case "$CMD" in
+    ls)
+        mdir $I "$(norm "${1:?path}")" ;;
+    cat)
+        mtype $I "$(norm "${1:?path}")" ;;
+    info)
+        minfo $I "$(norm "${1:-/}")" ;;
+    get)
+        mcopy $I "$(norm "${1:?guest-path}")" "${2:?host-dest}" ;;
+    put)
+        require_stopped
+        local_src=$(readlink -f "${1:?host-file}") || local_src=""
+        dest=$(norm "${2:?guest-path}")
+        [ -f "$local_src" ] || { echo "mt: no such host file: $local_src" >&2; exit 1; }
+        # mcopy silently fails (rc=1, no output) onto an existing guest file.
+        mdel $I "$dest" 2>/dev/null || true
+        mcopy $I "$local_src" "$dest"
+        echo "DEPLOYED $(basename "$local_src") $(stat -c%s "$local_src") bytes -> $dest" ;;
+    dir)
+        require_stopped
+        src=$(readlink -f "${1:?host-dir}") || src=""
+        dest=$(norm "${2:?guest-path}")
+        [ -d "$src" ] || { echo "mt: no such host dir: $src" >&2; exit 1; }
+        mcopy -s $I "$src" "$dest"
+        echo "COPIED dir $(basename "$src") -> $dest" ;;
+    rm)
+        require_stopped
+        mdel $I "$(norm "${1:?guest-file}")" ;;
+    rmtree)
+        require_stopped
+        path=$(norm "${1:?guest-dir}")
+        # mdeltree (mtools 4.x) removes a whole tree. Guard against wiping the
+        # root by accident: the path must name a real subdirectory, never ::/.
+        case "$path" in
+            ::/|"") echo "mt: refusing to rmtree the guest root ($path)" >&2; exit 1 ;;
+        esac
+        mdeltree $I "$path"
+        echo "DELETED tree $path" ;;
+    mkdir)
+        require_stopped
+        mmd $I "$(norm "${1:?guest-dir}")" ;;
+    -h|--help|help)
+        usage 0 ;;
+    *)
+        echo "mt: unknown command: $CMD (allowed: ls cat info get put dir rm rmtree mkdir)" >&2
+        exit 2 ;;
+esac
