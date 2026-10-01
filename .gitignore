@@ -43,6 +43,12 @@ CMakeFiles
 /.vscode
 /out
 
+# Local-only workspace data
+/.agents/
+/.scratch/
+/.tmp/
+/AGENTS.md
+
 # Windows resource compiler
 RC*
 
