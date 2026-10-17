@@ -99,11 +99,8 @@ voodoo_init_relax_settings(voodoo_t *voodoo)
     voodoo->wait_stats_enabled = voodoo->wait_stats_explicit && !voodoo_env_is_disabled(wait_env);
 
     voodoo->lfb_relax_enabled = relax_enabled;
-    voodoo->lfb_relax_full = relax_enabled && (strcmp(relax_env, "full") == 0);
-    voodoo->lfb_relax_ignore_cmdfifo = relax_enabled && (!strcmp(relax_env, "nocmdfifo") || !strcmp(relax_env, "2") || !strcmp(relax_env, "3") || !strcmp(relax_env, "4") || !strcmp(relax_env, "frontsync"));
-    voodoo->lfb_relax_ignore_draw = relax_enabled && (!strcmp(relax_env, "nodraw") || !strcmp(relax_env, "2") || !strcmp(relax_env, "3") || !strcmp(relax_env, "4") || !strcmp(relax_env, "frontsync"));
-    voodoo->lfb_relax_ignore_fb_writes = relax_enabled && (!strcmp(relax_env, "nowrites") || !strcmp(relax_env, "3") || !strcmp(relax_env, "4") || !strcmp(relax_env, "frontsync"));
-    voodoo->lfb_relax_front_sync = relax_enabled && (!strcmp(relax_env, "4") || !strcmp(relax_env, "frontsync"));
+    voodoo->lfb_relax_full    = relax_enabled && (strcmp(relax_env, "full") == 0);
+    voodoo->lfb_relax_front_sync = relax_enabled && (strcmp(relax_env, "4") == 0 || strcmp(relax_env, "frontsync") == 0);
 }
 
 static void
@@ -210,6 +207,78 @@ voodoo_recalc(voodoo_t *voodoo)
     voodoo->params.aux_row_width = voodoo->aux_row_width;
 }
 
+/* Ring work the fifo thread has not finished, for read_buf (-1 = any).
+   CMDFIFO parse state is excluded: the fifo can wait on words only the
+   guest publishes, which would make counting it a circular wait. */
+static int
+voodoo_lfb_work_pending(voodoo_t *voodoo, int read_buf)
+{
+    int pending = 0;
+
+    /* Mid-packet park: queued work behind it is not consumable yet. */
+    if (ATOMIC_LOAD(voodoo->cmdfifo_waiting))
+        return 0;
+
+    for (int buf = 0; buf < VOODOO_BUF_COUNT; buf++) {
+        /* Reads only order against their own buffer's work. */
+        if ((read_buf >= 0) && (buf != read_buf) && (buf != VOODOO_BUF_UNKNOWN))
+            continue;
+
+        pending += voodoo->pending_fb_writes_buf[buf];
+        pending += voodoo->pending_draw_cmds_buf[buf];
+    }
+
+    return pending;
+}
+
+/* Order a framebuffer read against earlier guest work: wake the fifo thread,
+   wait for it to drain, then the render threads. The two-round cap matters
+   because cmdfifo_waiting cannot see a park begun after the predicate check;
+   without it a wedged fifo would hang the read. */
+static void
+voodoo_lfb_wait_for_work(voodoo_t *voodoo, int read_buf)
+{
+    uint64_t wait_start  = 0;
+    uint64_t wait_spins  = 0;
+    int      wait_active = 0;
+    int      wait_rounds = 0;
+
+    while (voodoo_lfb_work_pending(voodoo, read_buf)) {
+        if (voodoo->wait_stats_enabled) {
+            if (!wait_active) {
+                wait_active = 1;
+                wait_start  = plat_timer_read();
+                voodoo->fifo_empty_waits++;
+            }
+            wait_spins++;
+        }
+
+        /* Reset before waiting so a lost wake costs one timeout, not a hang. */
+        thread_reset_event(voodoo->fifo_idle_event);
+        voodoo_wake_fifo_thread_now(voodoo);
+
+        /* Spin before sleeping: the drain usually finishes within the budget. */
+        voodoo_spin_until(voodoo_lfb_work_pending(voodoo, read_buf), LFB_READ_SPIN_NS);
+        if (!voodoo_lfb_work_pending(voodoo, read_buf))
+            break;
+
+        thread_wait_event(voodoo->fifo_idle_event, 1);
+
+        if ((voodoo->cmdfifo_enabled || voodoo->cmdfifo_enabled_2) && (++wait_rounds >= 2)) {
+            if (voodoo->wait_stats_enabled)
+                voodoo->lfb_wait_bails++;
+            break;
+        }
+    }
+
+    if (wait_active) {
+        voodoo->fifo_empty_wait_ticks += plat_timer_read() - wait_start;
+        voodoo->fifo_empty_spin_checks += wait_spins;
+    }
+
+    voodoo_wait_for_render_thread_idle(voodoo);
+}
+
 static uint16_t
 voodoo_readw(uint32_t addr, void *priv)
 {
@@ -249,48 +318,24 @@ voodoo_readw(uint32_t addr, void *priv)
             need_sync = 1;
 
         if (need_sync) {
+            int sync_buf = -1; /* -1 orders the read against work for any buffer */
+
             if (!voodoo->lfb_relax_enabled)
                 do_sync = 1;
             else if (voodoo->lfb_relax_full)
                 do_sync = 0;
-            else {
-                /* In relax mode, only back-buffer reads can skip the full FIFO flush. */
-                int pending_buf = 0;
-                int pending_unknown = 0;
-
-                if (read_buf >= 0 && read_buf < VOODOO_BUF_COUNT) {
-                    /* Work queued for the buffer being read must always force a sync.
-                       The relax flags only relax the unknown-target heuristic below; they
-                       must not suppress writes aimed at this buffer, or a back-buffer read
-                       races queued draw commands and returns stale data. */
-                    pending_buf += voodoo->pending_fb_writes_buf[read_buf];
-                    pending_buf += voodoo->pending_draw_cmds_buf[read_buf];
-                }
-
-                if (!voodoo->lfb_relax_ignore_fb_writes)
-                    pending_unknown += voodoo->pending_fb_writes_buf[VOODOO_BUF_UNKNOWN];
-                if (!voodoo->lfb_relax_ignore_draw)
-                    pending_unknown += voodoo->pending_draw_cmds_buf[VOODOO_BUF_UNKNOWN];
-                if (!voodoo->lfb_relax_ignore_cmdfifo) {
-                    if ((voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr) || voodoo->cmdfifo_in_sub)
-                        pending_unknown++;
-                    if ((voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2) || voodoo->cmdfifo_in_sub_2)
-                        pending_unknown++;
-                }
-
-                if (read_buf != VOODOO_BUF_BACK)
-                    do_sync = 1;
-                else
-                    do_sync = (pending_buf || pending_unknown);
+            else if (read_buf != VOODOO_BUF_BACK) {
+                /* Front and aux reads always order fully. */
+                do_sync = 1;
+            } else {
+                /* Back-buffer read: sync only if this buffer has pending work. */
+                sync_buf = read_buf;
+                do_sync  = voodoo_lfb_work_pending(voodoo, read_buf);
             }
 
             if (do_sync) {
                 voodoo->flush = 1;
-                while (!FIFO_EMPTY) {
-                    voodoo_wake_fifo_thread_now(voodoo);
-                    thread_wait_event(voodoo->fifo_empty_event, -1);
-                }
-                voodoo_wait_for_render_thread_idle(voodoo);
+                voodoo_lfb_wait_for_work(voodoo, sync_buf);
                 voodoo->flush = 0;
             } else if (voodoo->lfb_relax_enabled && !voodoo->lfb_relax_full) {
                 voodoo_wait_for_render_thread_idle(voodoo);
@@ -319,11 +364,9 @@ voodoo_readl(uint32_t addr, void *priv)
             voodoo->readl_tex_count++;
     } else if (addr & 0x400000) /*Framebuffer*/
     {
-        uint64_t fifo_wait_start = 0;
-        uint64_t fifo_wait_spins = 0;
-        int      fifo_wait_active = 0;
         int      need_sync = 0;
         int      do_sync = 0;
+        int      sync_buf = -1;
         int      read_buf = -1;
 
         if (SLI_ENABLED) {
@@ -357,35 +400,13 @@ voodoo_readl(uint32_t addr, void *priv)
                 do_sync = 1;
             else if (voodoo->lfb_relax_full)
                 do_sync = 0;
-            else {
-                /* In relax mode, only back-buffer reads can skip the full FIFO flush. */
-                int pending_buf = 0;
-                int pending_unknown = 0;
-
-                if (read_buf >= 0 && read_buf < VOODOO_BUF_COUNT) {
-                    /* Work queued for the buffer being read must always force a sync.
-                       The relax flags only relax the unknown-target heuristic below; they
-                       must not suppress writes aimed at this buffer, or a back-buffer read
-                       races queued draw commands and returns stale data. */
-                    pending_buf += voodoo->pending_fb_writes_buf[read_buf];
-                    pending_buf += voodoo->pending_draw_cmds_buf[read_buf];
-                }
-
-                if (!voodoo->lfb_relax_ignore_fb_writes)
-                    pending_unknown += voodoo->pending_fb_writes_buf[VOODOO_BUF_UNKNOWN];
-                if (!voodoo->lfb_relax_ignore_draw)
-                    pending_unknown += voodoo->pending_draw_cmds_buf[VOODOO_BUF_UNKNOWN];
-                if (!voodoo->lfb_relax_ignore_cmdfifo) {
-                    if ((voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr) || voodoo->cmdfifo_in_sub)
-                        pending_unknown++;
-                    if ((voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2) || voodoo->cmdfifo_in_sub_2)
-                        pending_unknown++;
-                }
-
-                if (read_buf != VOODOO_BUF_BACK)
-                    do_sync = 1;
-                else
-                    do_sync = (pending_buf || pending_unknown);
+            else if (read_buf != VOODOO_BUF_BACK) {
+                /* Front and aux reads always order fully. */
+                do_sync = 1;
+            } else {
+                /* Back-buffer read: sync only if this buffer has pending work. */
+                sync_buf = read_buf;
+                do_sync  = voodoo_lfb_work_pending(voodoo, read_buf);
             }
         }
 
@@ -409,23 +430,7 @@ voodoo_readl(uint32_t addr, void *priv)
 
         if (do_sync) {
             voodoo->flush = 1;
-            while (!FIFO_EMPTY) {
-                if (voodoo->wait_stats_enabled) {
-                    if (!fifo_wait_active) {
-                        fifo_wait_active = 1;
-                        fifo_wait_start  = plat_timer_read();
-                        voodoo->fifo_empty_waits++;
-                    }
-                    fifo_wait_spins++;
-                }
-                voodoo_wake_fifo_thread_now(voodoo);
-                thread_wait_event(voodoo->fifo_empty_event, -1);
-            }
-            if (fifo_wait_active) {
-                voodoo->fifo_empty_wait_ticks += plat_timer_read() - fifo_wait_start;
-                voodoo->fifo_empty_spin_checks += fifo_wait_spins;
-            }
-            voodoo_wait_for_render_thread_idle(voodoo);
+            voodoo_lfb_wait_for_work(voodoo, sync_buf);
             voodoo->flush = 0;
         } else if (need_sync && voodoo->lfb_relax_enabled && !voodoo->lfb_relax_full) {
             voodoo_wait_for_render_thread_idle(voodoo);
@@ -1318,6 +1323,7 @@ voodoo_card_init(const device_t *info)
     voodoo->fifo_empty_event         = thread_create_event();
     thread_set_event(voodoo->fifo_empty_event);
     ATOMIC_STORE(voodoo->fifo_empty_signaled, 1);
+    voodoo->fifo_idle_event          = thread_create_event();
     voodoo->render_not_full_event[0] = thread_create_event();
     voodoo->render_not_full_event[1] = thread_create_event();
     voodoo->render_not_full_event[2] = thread_create_event();
@@ -1450,6 +1456,7 @@ voodoo_2d3d_card_init(int type)
     voodoo->fifo_empty_event         = thread_create_event();
     thread_set_event(voodoo->fifo_empty_event);
     ATOMIC_STORE(voodoo->fifo_empty_signaled, 1);
+    voodoo->fifo_idle_event          = thread_create_event();
     voodoo->render_not_full_event[0] = thread_create_event();
     voodoo->render_not_full_event[1] = thread_create_event();
     voodoo->render_not_full_event[2] = thread_create_event();
@@ -1624,6 +1631,7 @@ voodoo_card_close(voodoo_t *voodoo)
     }
     thread_destroy_event(voodoo->fifo_not_full_event);
     thread_destroy_event(voodoo->fifo_empty_event);
+    thread_destroy_event(voodoo->fifo_idle_event);
     thread_destroy_event(voodoo->wake_main_thread);
     thread_destroy_event(voodoo->wake_fifo_thread);
     thread_destroy_event(voodoo->wake_render_thread[0]);
@@ -1633,9 +1641,9 @@ voodoo_card_close(voodoo_t *voodoo)
 
     if (voodoo->wait_stats_enabled && voodoo->wait_stats_explicit) {
         pclog("Voodoo wait stats (type=%d): fifo_full waits=%" PRIu64 " ticks=%" PRIu64 " spins=%" PRIu64
-              ", fifo_empty waits=%" PRIu64 " ticks=%" PRIu64 " spins=%" PRIu64
+              ", fifo_empty waits=%" PRIu64 " ticks=%" PRIu64 " spins=%" PRIu64 " bails=%" PRIu64
               ", render_wait waits=%" PRIu64 " ticks=%" PRIu64 " spins=%" PRIu64
-              ", readl fb=%" PRIu64 " sync=%" PRIu64 " nosync=%" PRIu64 " relaxed=%" PRIu64 " relax=%d full=%d nocmdfifo=%d nodraw=%d nowrites=%d frontsync=%d"
+              ", readl fb=%" PRIu64 " sync=%" PRIu64 " nosync=%" PRIu64 " relaxed=%" PRIu64 " relax=%d full=%d frontsync=%d"
               " sync_buf f=%" PRIu64 " b=%" PRIu64 " a=%" PRIu64
               " nosync_buf f=%" PRIu64 " b=%" PRIu64 " a=%" PRIu64
               " relaxed_buf f=%" PRIu64 " b=%" PRIu64 " a=%" PRIu64
@@ -1647,6 +1655,7 @@ voodoo_card_close(voodoo_t *voodoo)
               voodoo->fifo_empty_waits,
               voodoo->fifo_empty_wait_ticks,
               voodoo->fifo_empty_spin_checks,
+              voodoo->lfb_wait_bails,
               voodoo->render_waits,
               voodoo->render_wait_ticks,
               voodoo->render_wait_spin_checks,
@@ -1656,9 +1665,6 @@ voodoo_card_close(voodoo_t *voodoo)
               voodoo->readl_fb_relaxed_count,
               voodoo->lfb_relax_enabled,
               voodoo->lfb_relax_full,
-              voodoo->lfb_relax_ignore_cmdfifo,
-              voodoo->lfb_relax_ignore_draw,
-              voodoo->lfb_relax_ignore_fb_writes,
               voodoo->lfb_relax_front_sync,
               voodoo->readl_fb_sync_buf[0],
               voodoo->readl_fb_sync_buf[1],

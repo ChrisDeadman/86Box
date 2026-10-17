@@ -240,8 +240,7 @@ voodoo_queue_command(voodoo_t *voodoo, uint32_t addr_type, uint32_t val)
     voodoo->fifo_write_idx++;
     voodoo->cmd_status &= ~(1 << 24);
 
-    if (FIFO_ENTRIES > 0xe000)
-        voodoo_wake_fifo_thread(voodoo);
+    voodoo_wake_fifo_thread(voodoo);
 }
 
 void
@@ -300,10 +299,14 @@ cmdfifo_get(voodoo_t *voodoo)
         return 0;
 
     if (!voodoo->cmdfifo_in_sub) {
+        /* Flag the park so LFB reads know ring work is unconsumable. */
+        if (voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd == voodoo->cmdfifo_depth_wr))
+            ATOMIC_STORE(voodoo->cmdfifo_waiting, 1);
         while (voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd == voodoo->cmdfifo_depth_wr)) {
             thread_wait_event(voodoo->wake_fifo_thread, -1);
             thread_reset_event(voodoo->wake_fifo_thread);
         }
+        ATOMIC_STORE(voodoo->cmdfifo_waiting, 0);
 
         /* During card teardown, stop consuming an unpublished CMDFIFO tail. */
         if (!voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd >= voodoo->cmdfifo_depth_wr))
@@ -344,10 +347,14 @@ cmdfifo_get_2(voodoo_t *voodoo)
         return 0;
 
     if (!voodoo->cmdfifo_in_sub_2) {
+        /* Same park flag as channel 1; either park means waiting on the guest. */
+        if (voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd_2 == voodoo->cmdfifo_depth_wr_2))
+            ATOMIC_STORE(voodoo->cmdfifo_waiting, 1);
         while (voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd_2 == voodoo->cmdfifo_depth_wr_2)) {
             thread_wait_event(voodoo->wake_fifo_thread, -1);
             thread_reset_event(voodoo->wake_fifo_thread);
         }
+        ATOMIC_STORE(voodoo->cmdfifo_waiting, 0);
 
         /* During card teardown, stop consuming an unpublished CMDFIFO tail. */
         if (!voodoo->fifo_thread_run && (voodoo->cmdfifo_depth_rd_2 >= voodoo->cmdfifo_depth_wr_2))
@@ -399,8 +406,15 @@ voodoo_fifo_thread(void *param)
 
     while (voodoo->fifo_thread_run) {
         thread_set_event(voodoo->fifo_not_full_event);
-        thread_wait_event(voodoo->wake_fifo_thread, -1);
-        thread_reset_event(voodoo->wake_fifo_thread);
+
+        /* Spin before parking to absorb write->read->write churn. */
+        voodoo_spin_until(FIFO_EMPTY && voodoo->fifo_thread_run, FIFO_PARK_SPIN_NS);
+
+        if (FIFO_EMPTY) {
+            thread_wait_event(voodoo->wake_fifo_thread, -1);
+            thread_reset_event(voodoo->wake_fifo_thread);
+        }
+        thread_reset_event(voodoo->fifo_idle_event);
         voodoo->voodoo_busy = 1;
         while (!FIFO_EMPTY) {
             uint64_t      start_time = plat_timer_read();
@@ -1075,6 +1089,8 @@ voodoo_fifo_thread(void *param)
             end_time = plat_timer_read();
             voodoo->time += end_time - start_time;
         }
+
+        thread_set_event(voodoo->fifo_idle_event);
 
         voodoo->voodoo_busy = 0;
     }

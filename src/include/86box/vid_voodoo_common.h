@@ -29,6 +29,44 @@
 
 #define TEX_CACHE_MAX   64
 
+#ifdef _MSC_VER
+#    include <intrin.h>
+#endif
+#include <time.h>
+
+/* Yield the pipeline slot while spinning. */
+static __inline void
+voodoo_spin_pause(void)
+{
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+    __asm__ __volatile__("pause");
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#elif defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+    _mm_pause();
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+    __yield();
+#endif
+}
+
+/* (tv_nsec - start) underflows on a second-boundary wrap, ending the spin early. */
+#define voodoo_spin_until(cond, budget_ns)                                   \
+    do {                                                                     \
+        struct timespec ts_;                                                 \
+        uint64_t        start_;                                              \
+        clock_gettime(CLOCK_MONOTONIC, &ts_);                                \
+        start_ = (uint64_t) ts_.tv_nsec;                                     \
+        while (cond) {                                                       \
+            clock_gettime(CLOCK_MONOTONIC, &ts_);                            \
+            if (((uint64_t) ts_.tv_nsec - start_) >= (budget_ns))            \
+                break;                                                       \
+            voodoo_spin_pause();                                             \
+        }                                                                    \
+    } while (0)
+
+#define FIFO_PARK_SPIN_NS 40000ULL
+#define LFB_READ_SPIN_NS  10000ULL
+
 enum {
     VOODOO_1 = 0,
     VOODOO_SB50,
@@ -392,6 +430,7 @@ typedef struct voodoo_t {
     event_t  *fifo_not_full_event;
     event_t  *fifo_empty_event;
     ATOMIC_INT fifo_empty_signaled;
+    event_t  *fifo_idle_event;
     event_t  *render_not_full_event[4];
     event_t  *wake_render_thread[4];
 
@@ -474,6 +513,7 @@ typedef struct voodoo_t {
     ATOMIC_INT cmdfifo_depth_rd;
     ATOMIC_INT cmdfifo_depth_wr;
     ATOMIC_INT cmdfifo_enabled;
+    ATOMIC_INT cmdfifo_waiting;
     uint32_t   cmdfifo_amin;
     uint32_t   cmdfifo_amax;
     int        cmdfifo_holecount;
@@ -729,6 +769,7 @@ typedef struct voodoo_t {
     uint64_t fifo_empty_waits;
     uint64_t fifo_empty_wait_ticks;
     uint64_t fifo_empty_spin_checks;
+    uint64_t lfb_wait_bails;
     uint64_t render_waits;
     uint64_t render_wait_ticks;
     uint64_t render_wait_spin_checks;
@@ -745,9 +786,6 @@ typedef struct voodoo_t {
     int      wait_stats_explicit;
     int      lfb_relax_enabled;
     int      lfb_relax_full;
-    int      lfb_relax_ignore_cmdfifo;
-    int      lfb_relax_ignore_draw;
-    int      lfb_relax_ignore_fb_writes;
     int      lfb_relax_front_sync;
 
     int      force_blit_count;
